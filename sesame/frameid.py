@@ -3,6 +3,8 @@ import json
 import os
 import sys
 import time
+import pdb
+import pandas as pd
 from optparse import OptionParser
 
 from dynet import *
@@ -240,6 +242,7 @@ def identify_frames(builders, tokens, postags, lexunit, targetpositions, goldfra
         if trainmode and USE_DROPOUT:
             f_i = dropout(f_i, DROPOUT_RATE)
 
+        # restricted to only calc. over frames in valid_frames
         logloss = log_softmax(f_i, valid_frames)
 
         if not trainmode:
@@ -253,8 +256,11 @@ def identify_frames(builders, tokens, postags, lexunit, targetpositions, goldfra
 
     prediction = {tidx: (lexunit, Frame(chosenframe)) for tidx in targetpositions}
 
-    objective = -esum(losses) if losses else None
-    return objective, prediction
+    objective = -esum(losses) if logloss else None
+
+    # pdb.set_trace()
+
+    return objective, prediction, logloss, valid_frames
 
 def print_as_conll(goldexamples, pred_targmaps):
     with codecs.open(out_conll_file, "w", "utf-8") as f:
@@ -289,7 +295,7 @@ if options.mode in ["train", "refresh"]:
             inptoks = []
             unk_replace_tokens(trex.tokens, inptoks, VOCDICT, UNK_PROB, UNKTOKEN)
 
-            trexloss,_ = identify_frames(
+            trexloss,_,_,_ = identify_frames(
                 builders, inptoks, trex.postags, trex.lu, trex.targetframedict.keys(), trex.frame)
 
             if trexloss is not None:
@@ -304,7 +310,7 @@ if options.mode in ["train", "refresh"]:
                 predictions = []
                 for devex in devexamples:
                     devludict = devex.get_only_targets()
-                    dl, predicted = identify_frames(
+                    dl, predicted,_,_ = identify_frames(
                         builders, devex.tokens, devex.postags, devex.lu, devex.targetframedict.keys())
                     if dl is not None:
                         devloss += dl.scalar_value()
@@ -351,12 +357,13 @@ elif options.mode == "test":
     devexamples[0].print_internal_sent(logger)
 
     for testex in devexamples:
-        _, predicted = identify_frames(builders, testex.tokens, testex.postags, testex.lu, testex.targetframedict.keys())
+        objective, predicted, losses, valid_frames = identify_frames(builders, testex.tokens, testex.postags, testex.lu, testex.targetframedict.keys())
 
         tpfpfn = evaluate_example_frameid(testex.frame, predicted)
         corpus_tpfpfn = np.add(corpus_tpfpfn, tpfpfn)
 
         testpredictions.append(predicted)
+        # pdb.set_trace()
 
         sentnum = testex.sent_num
         if sentnum != sn:
@@ -414,9 +421,57 @@ elif options.mode == "predict":
     model.populate(model_file_name)
 
     predictions = []
+    df_sent = [""] * len(instances)
+    df_wp = [""] * len(instances)
+    df_pos = [""] * len(instances)
+    df_dict = [{} for _ in range(len(instances))]
+    # -logloss.npvalue()[valid_frames]
+    # [FRAMEDICT.getstr(x) for x in valid_frames]
+    idx = 0
     for instance in instances:
-        _, prediction = identify_frames(builders, instance.tokens, instance.postags, instance.lu, instance.targetframedict.keys())
+        objective, prediction, losses, valid_frames = identify_frames(builders, instance.tokens, instance.postags, instance.lu, instance.targetframedict.keys())
         predictions.append(prediction)
+        df_sent[idx] = " ".join([VOCDICT.getstr(x) for x in instance.tokens])
+        df_wp[idx] = " ".join([VOCDICT.getstr(instance.tokens[x]) for x in prediction.keys()])
+        df_pos[idx] = ";".join([str(x) for x in prediction.keys()])
+        if len(valid_frames) > 0:
+            frame_names = [FRAMEDICT.getstr(x) for x in valid_frames]
+            if len(valid_frames) == 1:
+                df_dict[idx][frame_names[0]] = [1.0]
+            else:
+                loss_list = losses.npvalue()[valid_frames]
+                for jdx in range(len(valid_frames)):
+                    df_dict[idx][frame_names[jdx]] = list(loss_list[jdx])
+        idx += 1
+    # pdb.set_trace()
+    df = pd.DataFrame({
+        "sentence" : df_sent,
+        "word_phrase" : df_wp,
+        "pos" : df_pos,
+        "frames" : df_dict
+        })
+    unroll_sent = []
+    unroll_wp = []
+    unroll_pos = []
+    unroll_frame = []
+    unroll_score = []
+    for idx in range(len(instances)):
+        for frame in df["frames"][idx].keys():
+            unroll_sent.append(df["sentence"][idx])
+            unroll_wp.append(df["word_phrase"][idx])
+            unroll_pos.append(df["pos"][idx])
+            unroll_frame.append(frame)
+            unroll_score.append(df["frames"][idx][frame])
+    df_unroll = pd.DataFrame({
+        "sentence" : unroll_sent,
+        "word_phrase" : unroll_wp,
+        "pos" : unroll_pos,
+        "frame" : unroll_frame,
+        "model_score" : unroll_score
+        })
+    df_unroll.to_csv("fn-classifier.csv", index=False)
+    # df.to_csv("sent-frames.csv")
+
     sys.stderr.write("Printing output in CoNLL format to {}\n".format(out_conll_file))
     print_as_conll(instances, predictions)
     sys.stderr.write("Done!\n")

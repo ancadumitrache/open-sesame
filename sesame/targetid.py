@@ -3,6 +3,8 @@ import json
 import os
 import sys
 import time
+import pdb
+import pandas as pd
 from optparse import OptionParser
 
 from dynet import *
@@ -320,6 +322,7 @@ def print_as_conll(gold_examples, predicted_target_dict):
         for gold, pred in zip(gold_examples, predicted_target_dict):
             for target in sorted(pred):
                 result = gold.get_predicted_target_conll(target, pred[target][0]) + "\n"
+                # pdb.set_trace()
                 conll_file.write(result)
         conll_file.close()
 
@@ -434,9 +437,28 @@ elif options.mode == "predict":
     model.populate(model_file_name)
 
     predictions = []
+    gold_sents = pd.read_csv("fn-sent.csv")
+    idx = 0
+    missing_lus = 0
     for instance in instances:
-        _, prediction = identify_targets(builders, instance.tokens, instance.postags, instance.lemmas)
+        # _, prediction = identify_targets(builders, instance.tokens, instance.postags, instance.lemmas)
+        prediction = {}
+        for jdx in range(len(instance.tokens)):
+            if gold_sents["b"][idx] + 1 >= jdx and VOCDICT.getstr(instance.tokens[jdx]) == gold_sents["word_phrase"][idx]:
+                try:
+                    prediction[jdx] = (
+                        create_lexical_unit(
+                            instance.lemmas[jdx],
+                            instance.postags[jdx],
+                            instance.tokens[jdx]),
+                        None)
+                except AssertionError:
+                    missing_lus += 1
+                    print "Missing LUs: " + str(missing_lus)
+                    continue
+        # pdb.set_trace()
         predictions.append(prediction)
+        idx += 1
     sys.stderr.write("Printing output in CoNLL format to {}\n".format(out_conll_file))
     print_as_conll(instances, predictions)
     sys.stderr.write("Done!\n")
