@@ -231,6 +231,8 @@ def identify_frames(builders, tokens, postags, lexunit, targetpositions, goldfra
     valid_frames = list(lufrmmap[lexunit.id])
     chosenframe = valid_frames[0]
     logloss = None
+    sigmoidloss = None
+    sigmoidloss_restricted = None
     if len(valid_frames) > 1:
         if USE_HIER and lexunit.id in relatedlus:
             lu_vec = esum([lu_x[luid] for luid in relatedlus[lexunit.id]])
@@ -244,6 +246,14 @@ def identify_frames(builders, tokens, postags, lexunit, targetpositions, goldfra
 
         # restricted to only calc. over frames in valid_frames
         logloss = log_softmax(f_i, valid_frames)
+        
+        sigmoidloss = f_i
+        # sigmoidloss = logistic(f_i)
+        # sigmoidloss = log_sigmoid(f_i)
+        # sigmoidloss = log_sigmoid(select_rows(f_i, valid_frames))
+
+
+        # pdb.set_trace()
 
         if not trainmode:
             chosenframe = np.argmax(logloss.npvalue())
@@ -260,7 +270,7 @@ def identify_frames(builders, tokens, postags, lexunit, targetpositions, goldfra
 
     # pdb.set_trace()
 
-    return objective, prediction, logloss, valid_frames
+    return objective, prediction, logloss, valid_frames, sigmoidloss
 
 def print_as_conll(goldexamples, pred_targmaps):
     with codecs.open(out_conll_file, "w", "utf-8") as f:
@@ -295,7 +305,7 @@ if options.mode in ["train", "refresh"]:
             inptoks = []
             unk_replace_tokens(trex.tokens, inptoks, VOCDICT, UNK_PROB, UNKTOKEN)
 
-            trexloss,_,_,_ = identify_frames(
+            trexloss,_,_,_,_ = identify_frames(
                 builders, inptoks, trex.postags, trex.lu, trex.targetframedict.keys(), trex.frame)
 
             if trexloss is not None:
@@ -310,7 +320,7 @@ if options.mode in ["train", "refresh"]:
                 predictions = []
                 for devex in devexamples:
                     devludict = devex.get_only_targets()
-                    dl, predicted,_,_ = identify_frames(
+                    dl, predicted,_,_,_ = identify_frames(
                         builders, devex.tokens, devex.postags, devex.lu, devex.targetframedict.keys())
                     if dl is not None:
                         devloss += dl.scalar_value()
@@ -357,7 +367,7 @@ elif options.mode == "test":
     devexamples[0].print_internal_sent(logger)
 
     for testex in devexamples:
-        objective, predicted, losses, valid_frames = identify_frames(builders, testex.tokens, testex.postags, testex.lu, testex.targetframedict.keys())
+        objective, predicted, losses, valid_frames, sigmoidloss = identify_frames(builders, testex.tokens, testex.postags, testex.lu, testex.targetframedict.keys())
 
         tpfpfn = evaluate_example_frameid(testex.frame, predicted)
         corpus_tpfpfn = np.add(corpus_tpfpfn, tpfpfn)
@@ -425,11 +435,16 @@ elif options.mode == "predict":
     df_wp = [""] * len(instances)
     df_pos = [""] * len(instances)
     df_dict = [{} for _ in range(len(instances))]
+    df_loss = [{} for _ in range(len(instances))]
+
     # -logloss.npvalue()[valid_frames]
     # [FRAMEDICT.getstr(x) for x in valid_frames]
     idx = 0
+    missing_frames = 0
     for instance in instances:
-        objective, prediction, losses, valid_frames = identify_frames(builders, instance.tokens, instance.postags, instance.lu, instance.targetframedict.keys())
+        objective, prediction, losses, valid_frames, sigmoidloss = identify_frames(builders, instance.tokens, instance.postags, instance.lu, instance.targetframedict.keys())
+
+        # pdb.set_trace()
         predictions.append(prediction)
         df_sent[idx] = " ".join([VOCDICT.getstr(x) for x in instance.tokens])
         df_wp[idx] = " ".join([VOCDICT.getstr(instance.tokens[x]) for x in prediction.keys()])
@@ -438,23 +453,34 @@ elif options.mode == "predict":
             frame_names = [FRAMEDICT.getstr(x) for x in valid_frames]
             if len(valid_frames) == 1:
                 df_dict[idx][frame_names[0]] = [1.0]
+                df_loss[idx][frame_names[0]] = [1.0]
             else:
                 loss_list = losses.npvalue()[valid_frames]
+                sigmoid_loss_list = sigmoidloss.npvalue()[valid_frames]
                 for jdx in range(len(valid_frames)):
                     df_dict[idx][frame_names[jdx]] = list(loss_list[jdx])
+                    df_loss[idx][frame_names[jdx]] = list(sigmoid_loss_list[jdx])
+
+
+        else:
+            pdb.set_trace()
+            missing_frames += 1
+            print "LUs with missing frames: " + str(missing_frames)
         idx += 1
     # pdb.set_trace()
     df = pd.DataFrame({
         "sentence" : df_sent,
         "word_phrase" : df_wp,
         "pos" : df_pos,
-        "frames" : df_dict
+        "frames" : df_dict,
+        "sigmoid" : df_loss
         })
     unroll_sent = []
     unroll_wp = []
     unroll_pos = []
     unroll_frame = []
     unroll_score = []
+    unroll_sigmoid_score = []
     for idx in range(len(instances)):
         for frame in df["frames"][idx].keys():
             unroll_sent.append(df["sentence"][idx])
@@ -462,14 +488,16 @@ elif options.mode == "predict":
             unroll_pos.append(df["pos"][idx])
             unroll_frame.append(frame)
             unroll_score.append(df["frames"][idx][frame])
+            unroll_sigmoid_score.append(df["sigmoid"][idx][frame])
     df_unroll = pd.DataFrame({
         "sentence" : unroll_sent,
         "word_phrase" : unroll_wp,
         "pos" : unroll_pos,
         "frame" : unroll_frame,
-        "model_score" : unroll_score
+        "model_score" : unroll_score,
+        "sigmoid_model_score" : unroll_sigmoid_score
         })
-    df_unroll.to_csv("fn-classifier.csv", index=False)
+    df_unroll.to_csv("wiki-verbs-12-classifier.csv", index=False)
     # df.to_csv("sent-frames.csv")
 
     sys.stderr.write("Printing output in CoNLL format to {}\n".format(out_conll_file))
